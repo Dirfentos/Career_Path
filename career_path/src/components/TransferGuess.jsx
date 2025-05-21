@@ -1,3 +1,4 @@
+// (többi import változatlan)
 import { useEffect, useState } from 'react';
 import { fetchTeams, fetchPlayersByTeam, fetchPlayerTransfers } from '../services/footballApi';
 
@@ -11,11 +12,31 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [timeLeft, setTimeLeft] = useState(20);
   const [canGuess, setCanGuess] = useState(true);
+  const [suggestions, setSuggestions] = useState([]);
+  const [knownPlayers, setKnownPlayers] = useState([]);
+  const [pendingScoreUpdate, setPendingScoreUpdate] = useState(null); // ✅ új state
+  const [allPlayers, setAllPlayers] = useState([]);
 
-  const loadTeams = async () => {
+
+ useEffect(() => {
+  const fetchAll = async () => {
     const data = await fetchTeams(leagueId, season);
-    setTeams(data.map(item => item.team));
+    const allTeams = data.map(item => item.team);
+    setTeams(allTeams);
+
+    const all = [];
+
+    for (const team of allTeams) {
+      const players = await fetchPlayersByTeam(team.id);
+      all.push(...players.map(p => p.player));
+    }
+
+    setAllPlayers(all);
   };
+
+  fetchAll();
+}, [leagueId, season]);
+
 
   const loadPlayer = async () => {
     setIsLoading(true);
@@ -48,12 +69,18 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
     }
 
     if (randomPlayer) {
+      setSuggestions([]);
       setPlayer(randomPlayer);
       setTransfers(transferData);
       setGuess('');
       setResult('');
-      setTimeLeft(20); // 🔄 idő belső state-ben
+      setTimeLeft(20);
       setCanGuess(true);
+
+      setKnownPlayers(prev => {
+        const alreadyKnown = prev.some(p => p.id === randomPlayer.id);
+        return alreadyKnown ? prev : [...prev, randomPlayer];
+      });
     } else {
       console.warn('⚠️ Nem találtunk játékost logóval.');
       setPlayer(null);
@@ -63,16 +90,10 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
     setIsLoading(false);
   };
 
-  // 📥 Frissítések betöltésekor
-  useEffect(() => {
-    loadTeams();
-  }, [leagueId, season]);
-
   useEffect(() => {
     if (teams.length > 0) loadPlayer();
   }, [teams]);
 
-  // ⏱️ időzítő visszaszámláló
   useEffect(() => {
     if (!canGuess || timeLeft <= 0) return;
 
@@ -83,12 +104,10 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
     return () => clearTimeout(timer);
   }, [timeLeft, canGuess]);
 
-  // ⏱️ ⬆️ idő frissítés App felé
   useEffect(() => {
     if (onTimeUpdate) onTimeUpdate(timeLeft);
   }, [timeLeft, onTimeUpdate]);
 
-  // ⛔ idő lejáratakor
   useEffect(() => {
     if (timeLeft === 0 && canGuess) {
       setResult(`⏰ Lejárt az idő! A helyes válasz: ${player?.name}`);
@@ -96,27 +115,76 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
     }
   }, [timeLeft, canGuess, player]);
 
-  // 🧠 Tipp ellenőrzése
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!canGuess || !player) return;
-
-    const playerLastName = player.name.split(' ').slice(-1)[0].toLowerCase();
-    const userGuess = guess.trim().toLowerCase();
-
-    if (userGuess === playerLastName) {
-      setResult('Helyes! 🎉');
-      setScore(prev => {
-        const updated = prev + 1;
-        if (onScoreUpdate) onScoreUpdate(updated); // ✅ App frissítése
-        return updated;
-      });
-      setCanGuess(false);
-    } else {
-      setResult(`Nem talált! 😢 A helyes válasz: ${player.name}`);
-      setCanGuess(false);
+  // ✅ új useEffect a biztonságos score frissítéshez
+  useEffect(() => {
+    if (pendingScoreUpdate !== null && onScoreUpdate) {
+      onScoreUpdate(pendingScoreUpdate);
+      setPendingScoreUpdate(null);
     }
-  };
+  }, [pendingScoreUpdate, onScoreUpdate]);
+
+const handleInputChange = (e) => {
+  const value = e.target.value;
+  setGuess(value);
+
+  if (value.trim() === '') {
+    setSuggestions([]);
+    return;
+  }
+
+  const normalizedInput = normalizeText(value);
+
+  const filtered = allPlayers.filter(player => {
+    const parts = player.name
+      .replace(/\./g, '')
+      .split(' ')
+      .filter(Boolean)
+      .map(normalizeText);
+
+    return parts.some(part => part.startsWith(normalizedInput));
+  });
+
+  setSuggestions(filtered.slice(0, 10)); // most már player objektumokat tárol
+};
+
+
+
+const normalizeText = (text) =>
+  text
+    .normalize("NFD") // szétbontja ékezetes karaktereket (é → e + ́ )
+    .replace(/[\u0300-\u036f]/g, "") // törli az ékezeteket
+    .toLowerCase()
+    .trim();
+
+const handleSubmit = (e) => {
+  e.preventDefault();
+  if (!canGuess || !player) return;
+
+  const normalizedGuess = normalizeText(guess);
+  const normalizedFullName = normalizeText(player.name);
+
+  const nameParts = player.name
+    .replace(/\./g, '')
+    .split(' ')
+    .filter(Boolean)
+    .map(normalizeText);
+
+  const isCorrect =
+    normalizedGuess === normalizedFullName ||  // teljes név egyezés
+    nameParts.some(part => part === normalizedGuess); // bármely névrész egyezés
+
+  if (isCorrect) {
+    const updated = score + 1;
+    setResult('Helyes! 🎉');
+    setScore(updated);
+    setPendingScoreUpdate(updated);
+    setCanGuess(false);
+  } else {
+    setResult(`Nem talált! 😢 A helyes válasz: ${player.name}`);
+    setCanGuess(false);
+  }
+};
+
 
   if (isLoading) return <p>Betöltés...</p>;
   if (!player || transfers.length === 0) return <p>Nincs elérhető adat.</p>;
@@ -139,26 +207,123 @@ const TransferGuess = ({ leagueId, season, onScoreUpdate, onTimeUpdate }) => {
         })}
       </div>
 
-      <form onSubmit={handleSubmit} style={{ marginTop: '20px' }}>
-        <input
-          disabled={!canGuess}
-          type="text"
-          value={guess}
-          onChange={(e) => setGuess(e.target.value)}
-          placeholder="Ide írd a tippedet..."
-          style={{ padding: '10px', fontSize: '16px' }}
-        />
+<form
+  onSubmit={handleSubmit}
+  style={{
+    marginTop: '20px',
+    position: 'relative',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '10px',
+  }}
+>
+  <input
+    disabled={!canGuess}
+    type="text"
+    value={guess}
+    onChange={handleInputChange}
+    placeholder="Ide írd a tippedet..."
+    style={{
+      padding: '10px',
+      fontSize: '16px',
+      width: '300px'
+    }}
+  />
 
-        <button type="submit" style={{ marginLeft: '10px', padding: '10px 20px' }}>
-          Tipp
-        </button>
-      </form>
+  {/* Autocomplete itt jön be alá */}
+  {canGuess && suggestions.length > 0 && (
+    <div
+      style={{
+        width: '300px',
+        maxHeight: '80px',
+        overflowY: 'auto',
+        border: '1px solid #ccc',
+        borderRadius: '4px',
+        backgroundColor: '#fff',
+        padding: '5px',
+        color: '#000',
+        textAlign: 'left',
+        zIndex: 1000
+      }}
+    >
+      {suggestions.map((player, index) => (
+        <div
+          key={index}
+          onClick={() => {
+            setGuess(player.name);
 
-      {result && <h3 style={{ marginTop: '20px' }}>{result}</h3>}
+            setSuggestions([]);
+          }}
+          style={{
+            cursor: 'pointer',
+            padding: '6px 10px',
+            borderBottom: '1px solid #eee'
+          }}
+        >
+          {player.name}
+        </div>
+      ))}
+    </div>
+  )}
 
-      <button onClick={loadPlayer} style={{ marginTop: '20px', padding: '10px 20px' }}>
+  <button
+    type="submit"
+    style={{
+      padding: '10px 20px',
+      fontSize: '16px'
+    }}
+  >
+    Tipp
+  </button>
+</form>
+
+
+
+{result && (
+  <div
+    style={{
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      backgroundColor: 'rgba(0, 0, 0, 0.4)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 9999
+    }}
+  >
+    <div
+      style={{
+        backgroundColor: '#fff',
+        padding: '30px',
+        borderRadius: '8px',
+        textAlign: 'center',
+        minWidth: '300px',
+        boxShadow: '0 4px 8px rgba(0, 0, 0, 0.2)'
+      }}
+    >
+      <h3 style={{ marginBottom: '20px', color: '#000' }}>{result}</h3>
+      <button
+        onClick={loadPlayer}
+        style={{
+          padding: '10px 20px',
+          fontSize: '16px',
+          backgroundColor: '#007bff',
+          color: '#fff',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer'
+        }}
+      >
         Következő játékos
       </button>
+    </div>
+  </div>
+)}
+
     </div>
   );
 };
